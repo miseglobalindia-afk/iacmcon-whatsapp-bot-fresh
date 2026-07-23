@@ -3,146 +3,338 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers
 const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const pino = require('pino');
 require('dotenv').config();
 
 const app = express();
 app.use(express.json());
 
-// Session Directory
+// ==================== CONFIG ====================
+const PORT = process.env.PORT || 3000;
 const SESSION_DIR = path.join(__dirname, 'session');
+const WHATSAPP_API_KEY = process.env.WHATSAPP_API_KEY || 'Password123';
+const MAX_RECONNECT_ATTEMPTS = 5;
+
+// Logger setup
+const logger = pino({ level: 'info' });
+
+// Create session directory if not exists
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true });
 }
 
+// ==================== STATE VARIABLES ====================
 let qrCodeUrl = null;
 let sock = null;
 let isConnected = false;
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
+let lastQRTime = null;
 
-// 🌐 1. QR Code Page Endpoint
+// ==================== ENDPOINTS ====================
+
+// 🌐 QR Code Page
 app.get('/qr', async (req, res) => {
-  if (qrCodeUrl) {
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>IACMCON WhatsApp Bot</title>
-        <style>
-          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); margin: 0; }
-          .container { text-align: center; background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); max-width: 400px; }
-          h1 { color: #0F5A7A; margin: 0 0 10px 0; font-size: 28px; }
-          .subheading { color: #666; margin-bottom: 30px; font-size: 14px; }
-          img { max-width: 300px; margin: 20px 0; border: 3px solid #667eea; border-radius: 10px; }
-          .status { color: #FFA500; font-weight: bold; font-size: 16px; }
-          .footer { color: #999; font-size: 12px; margin-top: 20px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <h1>🤖 IACMCON Bot</h1>
-          <p class="subheading">Scan with WhatsApp to connect</p>
-          <img src="${qrCodeUrl}" alt="QR Code" />
-          <p class="status">⏳ Scanning...</p>
-          <p class="footer">QR code expires in 60 seconds</p>
-        </div>
-        <script>
-          setTimeout(() => location.reload(), 30000);
-        </script>
-      </body>
-      </html>
-    `);
-  } else if (isConnected) {
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>IACMCON WhatsApp Bot</title>
-        <style>
-          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); margin: 0; }
-          .container { text-align: center; background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); max-width: 400px; }
-          h1 { color: #0F5A7A; margin: 0; font-size: 28px; }
-          .success { color: #28a745; font-weight: bold; font-size: 48px; margin: 20px 0; }
-          .message { color: #666; font-size: 16px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <h1>✅ IACMCON Bot</h1>
-          <p class="success">✓</p>
-          <p class="message">WhatsApp Connected & Ready!</p>
-          <p style="color: #999; font-size: 12px;">Status: Active</p>
-        </div>
-      </body>
-      </html>
-    `);
-  } else {
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>IACMCON WhatsApp Bot</title>
-        <style>
-          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); margin: 0; }
-          .container { text-align: center; background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); max-width: 400px; }
-          h1 { color: #0F5A7A; margin: 0; font-size: 28px; }
-          .loading { margin: 30px 0; }
-          .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #667eea; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto; }
-          @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-          .message { color: #666; font-size: 14px; margin-top: 20px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <h1>🤖 IACMCON Bot</h1>
-          <div class="loading">
-            <div class="spinner"></div>
-            <p class="message">Initializing... Please wait</p>
-            <p style="color: #999; font-size: 12px;">Refresh after 5 seconds</p>
+  try {
+    if (qrCodeUrl) {
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>IACMCON WhatsApp Bot - QR Code</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+              font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+              display: flex; 
+              justify-content: center; 
+              align-items: center; 
+              min-height: 100vh; 
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            }
+            .container { 
+              text-align: center; 
+              background: white; 
+              padding: 40px; 
+              border-radius: 15px; 
+              box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+              max-width: 450px;
+              width: 90%;
+            }
+            h1 { 
+              color: #0F5A7A; 
+              margin-bottom: 10px; 
+              font-size: 28px;
+            }
+            .subheading { 
+              color: #666; 
+              margin-bottom: 30px; 
+              font-size: 14px;
+            }
+            img { 
+              max-width: 100%; 
+              width: 300px;
+              height: 300px;
+              margin: 20px 0; 
+              border: 3px solid #667eea; 
+              border-radius: 10px;
+              padding: 5px;
+            }
+            .status { 
+              color: #FFA500; 
+              font-weight: bold; 
+              font-size: 16px;
+              animation: pulse 2s infinite;
+            }
+            .footer { 
+              color: #999; 
+              font-size: 12px; 
+              margin-top: 20px;
+            }
+            @keyframes pulse {
+              0%, 100% { opacity: 1; }
+              50% { opacity: 0.7; }
+            }
+            .timer { font-size: 12px; color: #999; margin-top: 10px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>🤖 IACMCON Bot</h1>
+            <p class="subheading">Scan with WhatsApp to connect</p>
+            <img src="${qrCodeUrl}" alt="QR Code" />
+            <p class="status">⏳ Scanning...</p>
+            <p class="timer">QR expires in <span id="timer">60</span>s</p>
+            <p class="footer">Make sure WhatsApp is open on your phone</p>
           </div>
-        </div>
-        <script>
-          setTimeout(() => location.reload(), 5000);
-        </script>
-      </body>
-      </html>
-    `);
+          <script>
+            let seconds = 60;
+            setInterval(() => {
+              seconds--;
+              document.getElementById('timer').textContent = seconds;
+              if (seconds <= 0) {
+                location.reload();
+              }
+            }, 1000);
+            
+            // Refresh page every 30 seconds to get fresh QR
+            setTimeout(() => location.reload(), 30000);
+          </script>
+        </body>
+        </html>
+      `);
+    } else if (isConnected) {
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>IACMCON WhatsApp Bot - Connected</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+              font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+              display: flex; 
+              justify-content: center; 
+              align-items: center; 
+              min-height: 100vh; 
+              background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
+            }
+            .container { 
+              text-align: center; 
+              background: white; 
+              padding: 40px; 
+              border-radius: 15px; 
+              box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+              max-width: 450px;
+              width: 90%;
+            }
+            h1 { 
+              color: #0F5A7A; 
+              margin-bottom: 20px; 
+              font-size: 28px;
+            }
+            .success { 
+              color: #28a745; 
+              font-weight: bold; 
+              font-size: 60px; 
+              margin: 20px 0;
+            }
+            .message { 
+              color: #666; 
+              font-size: 16px;
+              margin: 15px 0;
+            }
+            .details {
+              background: #f8f9fa;
+              border-left: 4px solid #28a745;
+              padding: 15px;
+              text-align: left;
+              margin-top: 20px;
+              border-radius: 5px;
+              font-size: 12px;
+              color: #666;
+            }
+            .details p { margin: 5px 0; }
+            .label { font-weight: bold; color: #0F5A7A; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>✅ IACMCON Bot</h1>
+            <p class="success">✓</p>
+            <p class="message">WhatsApp Connected & Ready!</p>
+            <div class="details">
+              <p><span class="label">Status:</span> Active</p>
+              <p><span class="label">Time:</span> ${new Date().toLocaleString('en-IN')}</p>
+              <p><span class="label">Ready to send:</span> Messages & Documents</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `);
+    } else {
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>IACMCON WhatsApp Bot - Initializing</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+              font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+              display: flex; 
+              justify-content: center; 
+              align-items: center; 
+              min-height: 100vh; 
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            }
+            .container { 
+              text-align: center; 
+              background: white; 
+              padding: 40px; 
+              border-radius: 15px; 
+              box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+              max-width: 450px;
+              width: 90%;
+            }
+            h1 { 
+              color: #0F5A7A; 
+              margin-bottom: 20px; 
+              font-size: 28px;
+            }
+            .spinner { 
+              border: 4px solid #f3f3f3; 
+              border-top: 4px solid #667eea; 
+              border-radius: 50%; 
+              width: 50px; 
+              height: 50px; 
+              animation: spin 1s linear infinite; 
+              margin: 30px auto;
+            }
+            @keyframes spin { 
+              0% { transform: rotate(0deg); } 
+              100% { transform: rotate(360deg); } 
+            }
+            .message { 
+              color: #666; 
+              font-size: 14px;
+              margin: 15px 0;
+            }
+            .hint { 
+              color: #999; 
+              font-size: 12px;
+              margin-top: 20px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>🤖 IACMCON Bot</h1>
+            <div class="spinner"></div>
+            <p class="message">Initializing WhatsApp connection...</p>
+            <p class="hint">Refresh after 5 seconds or wait for auto-refresh</p>
+          </div>
+          <script>
+            setTimeout(() => location.reload(), 5000);
+          </script>
+        </body>
+        </html>
+      `);
+    }
+  } catch (error) {
+    res.status(500).send(`<h2>Error: ${error.message}</h2>`);
   }
 });
 
-// 🏥 2. Health Check Endpoint
+// 🏥 Health Check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     whatsappConnected: isConnected,
     reconnectAttempts: reconnectAttempts,
+    qrGenerated: !!qrCodeUrl,
     timestamp: new Date().toISOString()
   });
 });
 
-// 📱 3. Send WhatsApp Endpoint (Text + PDF Support)
+// 📊 Status Endpoint
+app.get('/status', (req, res) => {
+  res.json({
+    bot: {
+      version: '1.0.0',
+      name: 'IACMCON WhatsApp Bot',
+      environment: process.env.NODE_ENV || 'production'
+    },
+    connection: {
+      connected: isConnected,
+      reconnectAttempts: reconnectAttempts,
+      maxAttempts: MAX_RECONNECT_ATTEMPTS
+    },
+    qr: {
+      generated: !!qrCodeUrl,
+      generatedAt: lastQRTime
+    },
+    server: {
+      port: PORT,
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString()
+    }
+  });
+});
+
+// 📱 Send WhatsApp Message
 app.post('/send-whatsapp', async (req, res) => {
   try {
     const { apiKey, phone, message, pdfUrl, fileName } = req.body;
 
-    const validApiKey = process.env.WHATSAPP_API_KEY || "Password123";
-    if (apiKey !== validApiKey) {
-      return res.status(401).json({ success: false, error: 'Unauthorized: Invalid API Key' });
-    }
-
-    if (!sock || !isConnected) {
-      return res.status(400).json({ 
+    // Validate API Key
+    if (apiKey !== WHATSAPP_API_KEY) {
+      return res.status(401).json({ 
         success: false, 
-        error: 'WhatsApp not connected. Please scan QR code first.',
-        connected: isConnected
+        error: 'Unauthorized: Invalid API Key' 
       });
     }
 
-    if (!phone) {
-      return res.status(400).json({ success: false, error: 'phone is required' });
+    // Check connection
+    if (!sock || !isConnected) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'WhatsApp not connected. Scan QR code first.',
+        qrUrl: `${req.protocol}://${req.get('host')}/qr`
+      });
     }
 
-    // Phone number cleaning
+    // Validate phone
+    if (!phone) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Phone number is required' 
+      });
+    }
+
+    // Clean phone number
     let cleanNumber = phone.toString().replace(/\D/g, '');
     if (cleanNumber.length === 10) {
       cleanNumber = '91' + cleanNumber;
@@ -151,67 +343,67 @@ app.post('/send-whatsapp', async (req, res) => {
     const jid = `${cleanNumber}@s.whatsapp.net`;
 
     try {
-      // 📄 Agar PDF URL diya gaya hai toh Document bhejo
+      let messageId;
+
+      // Send PDF if provided
       if (pdfUrl) {
-        const msgId = await sock.sendMessage(jid, {
+        messageId = await sock.sendMessage(jid, {
           document: { url: pdfUrl },
           mimetype: 'application/pdf',
-          fileName: fileName || 'Registration_Document.pdf',
+          fileName: fileName || 'Document.pdf',
           caption: message || ''
         });
-        console.log(`✅ PDF document sent successfully to ${cleanNumber} (ID: ${msgId})`);
-        res.json({ 
-          success: true, 
-          sentTo: cleanNumber,
-          messageId: msgId,
-          type: 'document'
-        });
+        logger.info(`✅ PDF sent to ${cleanNumber} (ID: ${messageId})`);
       } 
-      // 💬 Agar sirf Text Message bhejna ho
+      // Send Text message
       else if (message) {
-        const msgId = await sock.sendMessage(jid, { text: message });
-        console.log(`✅ Text message sent successfully to ${cleanNumber} (ID: ${msgId})`);
-        res.json({ 
-          success: true, 
-          sentTo: cleanNumber,
-          messageId: msgId,
-          type: 'text'
-        });
+        messageId = await sock.sendMessage(jid, { text: message });
+        logger.info(`✅ Text sent to ${cleanNumber} (ID: ${messageId})`);
       } 
       else {
-        return res.status(400).json({ success: false, error: 'Either message or pdfUrl is required' });
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Either message or pdfUrl is required' 
+        });
       }
+
+      return res.json({ 
+        success: true, 
+        sentTo: cleanNumber,
+        messageId: messageId,
+        timestamp: new Date().toISOString()
+      });
+
     } catch (sendError) {
-      console.error(`❌ Failed to send to ${cleanNumber}:`, sendError.message);
+      logger.error(`❌ Send failed to ${cleanNumber}: ${sendError.message}`);
       return res.status(500).json({ 
         success: false, 
-        error: `Failed to send message: ${sendError.message}`,
-        sentTo: cleanNumber
+        error: sendError.message,
+        phone: cleanNumber
       });
     }
 
   } catch (error) {
-    console.error('❌ Error in /send-whatsapp:', error);
-    res.status(500).json({ success: false, error: error.message });
+    logger.error(`Error in /send-whatsapp: ${error.message}`);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
   }
 });
 
-// 🔄 Connection Handler
+// ==================== WHATSAPP CONNECTION ====================
+
 async function connectToWhatsApp() {
   try {
-    console.log(`🔄 Connecting to WhatsApp (Attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+    logger.info(`🔄 Connecting to WhatsApp (Attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+    
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
     sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
-      logger: require('pino')({ 
-        level: 'error',
-        transport: {
-          target: 'pino-pretty',
-          options: { translateTime: 'SYS:standard', ignore: 'pid,hostname' }
-        }
-      }),
+      logger: pino({ level: 'silent' }),
       browser: Browsers.ubuntu('Chrome'),
       connectTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
@@ -221,86 +413,111 @@ async function connectToWhatsApp() {
       getMessage: async () => undefined
     });
 
+    // Connection updates
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr, isNewLogin } = update;
 
+      // QR Code generated
       if (qr) {
+        lastQRTime = new Date().toISOString();
         qrCodeUrl = await qrcode.toDataURL(qr);
-        console.log('📱 New QR Code generated! Open /qr page in browser.');
+        logger.info('📱 New QR Code generated! Open /qr in browser');
       }
 
+      // Connected successfully
       if (connection === 'open') {
         isConnected = true;
-        reconnectAttempts = 0; // Reset on successful connection
+        reconnectAttempts = 0;
         qrCodeUrl = null;
-        console.log('✅ WhatsApp Successfully Connected!');
-        console.log('📊 Bot ready to send messages');
+        logger.info('✅ WhatsApp Connected Successfully!');
+        logger.info('📊 Bot ready to send messages');
       }
 
+      // Connection closed
       if (connection === 'close') {
         isConnected = false;
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const errorMessage = lastDisconnect?.error?.message || 'Unknown error';
+        const errorMsg = lastDisconnect?.error?.message || 'Unknown error';
         
-        console.log(`\n❌ Connection Closed`);
-        console.log(`   Status Code: ${statusCode}`);
-        console.log(`   Error: ${errorMessage}`);
-        console.log(`   Time: ${new Date().toLocaleTimeString()}\n`);
+        logger.error(`❌ Connection closed - Status: ${statusCode}, Error: ${errorMsg}`);
 
-        // Check disconnect reason
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== DisconnectReason.forbidden;
+        // Determine if should reconnect
+        const shouldReconnect = 
+          statusCode !== DisconnectReason.loggedOut && 
+          statusCode !== DisconnectReason.forbidden;
 
         if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
           reconnectAttempts++;
-          const delayMs = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 60000); // Exponential backoff
-          console.log(`🔄 Reconnecting in ${delayMs / 1000} seconds...`);
+          const delayMs = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 60000);
+          logger.info(`🔄 Reconnecting in ${delayMs / 1000}s (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
           setTimeout(connectToWhatsApp, delayMs);
         } else if (statusCode === DisconnectReason.loggedOut) {
-          console.log('🔐 Logged out. Clear session folder and restart.');
-          console.log('   Run: rm -rf session/ && npm start');
-          isConnected = false;
+          logger.error('🔐 Logged out. Clear session/ and restart');
         } else {
-          console.log(`⚠️  Max reconnect attempts reached. Manual restart needed.`);
+          logger.error('❌ Max reconnect attempts reached');
         }
       }
 
       if (connection === 'connecting') {
-        console.log('🔗 Connecting...');
+        logger.info('🔗 Connecting...');
       }
     });
 
+    // Save credentials
     sock.ev.on('creds.update', saveCreds);
 
     // Connection error handler
     sock.ev.on('connection.error', (error) => {
-      console.error('❌ Connection Error:', error?.message || error);
+      logger.error(`🚨 Connection error: ${error?.message || error}`);
     });
 
   } catch (error) {
-    console.error('❌ WhatsApp Connection Error:', error?.message || error);
+    logger.error(`❌ Connection error: ${error?.message || error}`);
     reconnectAttempts++;
     
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       setTimeout(connectToWhatsApp, 5000);
     } else {
-      console.log('❌ Failed to connect after max attempts');
+      logger.error('❌ Failed after max attempts');
     }
   }
 }
 
-// Graceful shutdown
+// ==================== GRACEFUL SHUTDOWN ====================
+
 process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down gracefully...');
+  logger.info('🛑 Shutting down...');
   if (sock) {
     await sock.end();
   }
   process.exit(0);
 });
 
-const PORT = process.env.PORT || 3000;
+process.on('SIGTERM', async () => {
+  logger.info('🛑 Terminating...');
+  if (sock) {
+    await sock.end();
+  }
+  process.exit(0);
+});
+
+// ==================== START SERVER ====================
+
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 Health check: http://localhost:${PORT}/health`);
-  console.log(`📱 QR Code: http://localhost:${PORT}/qr`);
+  logger.info(`🚀 Server running on port ${PORT}`);
+  logger.info(`📱 QR Code: http://localhost:${PORT}/qr`);
+  logger.info(`🏥 Health: http://localhost:${PORT}/health`);
+  logger.info(`📊 Status: http://localhost:${PORT}/status`);
+  
   connectToWhatsApp();
+});
+
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+  logger.error(`⚠️ Uncaught Exception: ${error.message}`);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error(`⚠️ Unhandled Rejection: ${reason}`);
 });
