@@ -59,10 +59,10 @@ app.get('/health', (req, res) => {
   });
 });
 
-// 📱 3. Send WhatsApp Endpoint
+// 📱 3. Send WhatsApp Endpoint (Text + PDF Support)
 app.post('/send-whatsapp', async (req, res) => {
   try {
-    const { apiKey, phone, message } = req.body;
+    const { apiKey, phone, message, pdfUrl, fileName } = req.body;
 
     const validApiKey = process.env.WHATSAPP_API_KEY || "Password123";
     if (apiKey !== validApiKey) {
@@ -76,23 +76,41 @@ app.post('/send-whatsapp', async (req, res) => {
       });
     }
 
-    if (!phone || !message) {
-      return res.status(400).json({ success: false, error: 'phone and message are required' });
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'phone is required' });
     }
 
+    // Phone number cleaning
     let cleanNumber = phone.toString().replace(/\D/g, '');
     if (cleanNumber.length === 10) {
       cleanNumber = '91' + cleanNumber;
     }
 
     const jid = `${cleanNumber}@s.whatsapp.net`;
-    await sock.sendMessage(jid, { text: message });
 
-    console.log(`✅ Message sent to ${cleanNumber}`);
+    // 📄 Agar PDF URL diya gaya hai toh Document bhejo
+    if (pdfUrl) {
+      await sock.sendMessage(jid, {
+        document: { url: pdfUrl },
+        mimetype: 'application/pdf',
+        fileName: fileName || 'Registration_Document.pdf',
+        caption: message || '' // Document ke sath ka text message
+      });
+      console.log(`✅ PDF document sent successfully to ${cleanNumber}`);
+    } 
+    // 💬 Agar sirf Text Message bhejna ho
+    else if (message) {
+      await sock.sendMessage(jid, { text: message });
+      console.log(`✅ Text message sent successfully to ${cleanNumber}`);
+    } 
+    else {
+      return res.status(400).json({ success: false, error: 'Either message or pdfUrl is required' });
+    }
+
     res.json({ success: true, sentTo: cleanNumber });
 
   } catch (error) {
-    console.error('❌ Error sending message:', error);
+    console.error('❌ Error sending WhatsApp message:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -117,7 +135,7 @@ async function connectToWhatsApp() {
 
       if (qr) {
         qrCodeUrl = await qrcode.toDataURL(qr);
-        console.log('📱 New QR Code generated! Open http://localhost:3000/qr in browser.');
+        console.log('📱 New QR Code generated! Open /qr page in browser.');
       }
 
       if (connection === 'open') {
@@ -130,7 +148,6 @@ async function connectToWhatsApp() {
         isConnected = false;
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         console.log('❌ Connection Closed Status Code:', statusCode);
-        console.log('❌ Full Error Details:', JSON.stringify(lastDisconnect?.error, null, 2));
 
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         if (shouldReconnect) {
