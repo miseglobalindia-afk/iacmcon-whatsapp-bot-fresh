@@ -11,7 +11,14 @@ app.use(express.json());
 
 // ==================== CONFIG ====================
 const PORT = process.env.PORT || 3000;
-const SESSION_DIR = path.join(__dirname, 'session');
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const IS_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT_ID;
+
+// Session storage - /tmp for Railway, local for development
+const SESSION_DIR = NODE_ENV === 'production' 
+  ? '/tmp/whatsapp-session'
+  : path.join(__dirname, 'session');
+
 const WHATSAPP_API_KEY = process.env.WHATSAPP_API_KEY || 'Password123';
 const MAX_RECONNECT_ATTEMPTS = 5;
 
@@ -21,7 +28,12 @@ const logger = pino({ level: 'info' });
 // Create session directory if not exists
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true });
+  logger.info(`✅ Created session directory: ${SESSION_DIR}`);
 }
+
+logger.info(`🔧 Environment: ${NODE_ENV}`);
+logger.info(`🌐 Platform: ${IS_RAILWAY ? '🚂 Railway' : '💻 Local'}`);
+logger.info(`📁 Session Dir: ${SESSION_DIR}`);
 
 // ==================== STATE VARIABLES ====================
 let qrCodeUrl = null;
@@ -35,6 +47,8 @@ let lastQRTime = null;
 // 🌐 QR Code Page
 app.get('/qr', async (req, res) => {
   try {
+    logger.info(`[/qr] Request received - QR Status: ${qrCodeUrl ? 'Generated' : 'Not Yet'}, Connected: ${isConnected}`);
+    
     if (qrCodeUrl) {
       return res.send(`
         <!DOCTYPE html>
@@ -397,8 +411,16 @@ app.post('/send-whatsapp', async (req, res) => {
 async function connectToWhatsApp() {
   try {
     logger.info(`🔄 Connecting to WhatsApp (Attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+    logger.info(`   Session Directory: ${SESSION_DIR}`);
     
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+    
+    // Check if credentials exist
+    if (state.creds.me) {
+      logger.info(`✅ Existing credentials found for: ${state.creds.me.id}`);
+    } else {
+      logger.info(`📱 No existing credentials - QR code will be generated`);
+    }
 
     sock = makeWASocket({
       auth: state,
@@ -420,8 +442,14 @@ async function connectToWhatsApp() {
       // QR Code generated
       if (qr) {
         lastQRTime = new Date().toISOString();
-        qrCodeUrl = await qrcode.toDataURL(qr);
-        logger.info('📱 New QR Code generated! Open /qr in browser');
+        try {
+          qrCodeUrl = await qrcode.toDataURL(qr);
+          logger.info('📱 New QR Code generated! Open /qr in browser');
+          logger.info(`   URL: http://localhost:${PORT}/qr (local) or Railway URL/qr (production)`);
+          logger.info(`   QR Generated at: ${lastQRTime}`);
+        } catch (qrError) {
+          logger.error(`❌ Failed to generate QR code: ${qrError.message}`);
+        }
       }
 
       // Connected successfully
